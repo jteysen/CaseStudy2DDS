@@ -1,0 +1,429 @@
+---
+title: "Frito Lay Analysis of Employee Attrition and Salaries"
+author: "Josh Eysenbach"
+date: "4/10/2020"
+output: html_document
+---
+
+Presentation Link:
+
+Github Repository: https://github.com/jteysen/CaseStudy2DDS
+
+## Executive Summary
+
+Frito Lay has contingently retained DDSAnalytics for company talent management. Company leadership wishes to pilot the program with an analysis of employee attrition based on the available data of current and former employees. As an aside investigation, they would also like to model current employee salaries (by Monthly Income) based on this same data, but the central focus for the presentation is on employee retention. 
+
+Based on exploration of the provided employee dataset through various models and comparisons, there are few key factors that contribute to attrition.
+
+The analysis carried out to produce the models for predicting Attrition and Monthly Salaries is included in its entirety below.
+
+#### Libraries
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(corrplot)
+library(ggthemes)
+library(e1071)
+library(caret)
+library(class)
+library(leaps)
+library(car)
+library(plotly)
+library(mvtnorm)
+```
+
+### Initial Data Cleanup and EDA
+```{r, message=FALSE, echo=FALSE}
+cs2 <- read.csv("CaseStudy2-data.csv",header = TRUE)
+head(cs2)
+```
+
+After importing the data, we should first look for any missing values.
+```{r find missing values}
+#Find out which columns have missing values
+names(which(colSums(is.na(cs2))>0))
+```
+
+There does not appear to be any missing values in the entire dataset. We can summarize all of the variables to get an idea of their scales and spreads, as well as identify any that can be removed.
+
+```{r summarize each variable}
+summary(cs2)
+```
+
+Prediction models can obviously exclude superfluous data such as employee identifiers. We can also see from the summaries that Standard Hours and Over18 can also be removed as they are the same for every subject in the dataset.
+
+```{r remove variables}
+cs2m <- select(cs2, -c("ID", "EmployeeCount", "EmployeeNumber", "StandardHours", "Over18"))
+```
+
+A correlation matrix can be used to observe collinearity of the continuous variables in the data. This is useful for both the attrition and salary analysis. 
+
+```{r correlation matrix, message=FALSE, warning=FALSE}
+#Plot numeric variables v numeric variables
+
+cs2m %>% keep(is.numeric) %>% cor %>% corrplot("upper", addCoef.col = "white", number.digits = 2, number.cex = 0.5, method="square", tl.srt=45, tl.cex = 0.6)
+```
+
+We can see from the correlation matrix that there are a number of postively correlated variables.This could help us later when we are trying to predict Salaries. 
+
+We can look at density Curves to see which numeric variables could have effects on a certain categorical outcome. These could be useful for the attrition analysis, where we are trying to classify employees into 2 groups by attrition likelihood.
+
+```{r density curves against attrition}
+densityPlots <- function(df, explanatory, response){
+df %>% ggplot(aes_string(x = explanatory, fill = response)) + geom_density(alpha=0.5)
+}
+densityPlotsList <- lapply(cs2m %>% keep(is.numeric) %>% colnames, function(x) densityPlots(cs2m, x, "Attrition"))
+for(i in densityPlotsList){
+  print(i)
+}
+#densityPlots(cs2m, "Age", "Attrition")
+```
+
+For categorical variables we can use a variable review grid that can visualize trends and differences in categorical preditors and the response. In this case, we are looking at the differences in attrition for each variable.
+
+```{r Categorical Variable Review Grid}
+# 1. Name target variable
+targetCatCat <- "Attrition"
+# 2. Name explanatory variable
+explanatory <- cs2m %>% keep(is.factor) %>% colnames
+# 3. Create function
+numCatCat <- function(df, explanatory, response) {
+  ggplot(data = df) +geom_bar(aes_string(x = explanatory, fill = response), position = "fill", alpha = 0.9) + coord_flip() + xlab(explanatory)
+}
+
+# 4. Create plot list for plot_grid function to reference
+plotlistCatCat <- lapply(explanatory, function(x) numCatCat(cs2m, x, targetCatCat))
+# output plots in a loop
+for(i in plotlistCatCat){
+  print(i)
+}
+```
+
+The results show that there are some clear separations between levels of most of the categorical variables. It appears that the best course of action intially is to include all of these variables when building any models. 
+
+### Test and Training Sets 
+
+Before we start with either analysis we can split up the dataset into a training and test set for validating any models we run.
+```{r}
+#split into training and test sets for cv. Dataset is 870 obs; split in half with 435
+set.seed(1234)
+index<-sample(1:dim(cs2m)[1],435,replace=F)
+train<-cs2m[index,]
+test<-cs2m[-index,]
+```
+
+
+## Attrition Analysis
+
+### Classification using Naive-Bayes
+
+```{r,message=FALSE, warning=FALSE}
+library(klaR)
+```
+
+The function below will train a Naive Bayes model using internal cross validation and list the top predictors of all of the available variables.
+```{r, message=FALSE, warning=FALSE}
+
+x = cs2m[,-2]
+y = cs2m$Attrition
+control <- rfeControl(functions=nbFuncs, method="cv", number=100) #nbFuncs is for Naive Bayes
+results <- rfe(x, y, rfeControl=control)
+predictors <- predictors(results) #save the selected predicors so we can re-run the model with them
+
+predictors
+
+plot(results, type=c("g", "o")) #show a plot of accuracy vs number of predictors (we are mode concerned with Sens and Spec)
+```
+
+The plot shows model accuracy vs number of predictors added and it looks like 15-16 predictors gets good accuracy before we get into overfitting problems. However, we are more concerned with the specificity (or number of "yes" responses for attrition) since there are far fewer of them in the data. We can run models on test and train sets using whatever number of the top predictors we want from the selection done above.Then we can run the model on the full dataset.
+
+```{r}
+#Accuracy, Sensitivity and Specificity of Model on Internal train and test partitions
+model = naiveBayes(train[predictors[1:16]],train$Attrition)
+confusionMatrix(table(predict(model,test[predictors[1:16]]), test$Attrition))
+
+#Accuracy, Sensitivity and Specificity of Model on Training set (Full Dataset)
+fullmodel = naiveBayes(cs2m[predictors[1:16]],cs2m$Attrition)
+confusionMatrix(table(predict(fullmodel,cs2m[predictors[1:16]]), cs2m$Attrition))
+```
+
+The problem with this is that ther are so many fewer data points for "yes" (employees that left). This makes it difficult to achieve a high percentage of "yes" responses.
+
+We can use a random oversampling technique by way of the ROSE package to synthetically balance the yes and no responses. This could potentially reduce overall model accuracy, but our goal is to improve the low specificity (correct "yes") of the model.
+```{r}
+library(ROSE)
+table(cs2m$Attrition)
+
+cs2m.balanced <- ROSE(Attrition~., data = cs2m)$data
+table(cs2m.balanced$Attrition)
+```
+
+Now we have a dataset that is more balanced to run the model. We can split it into new oversampled training and test sets.
+```{r}
+#split into training and test sets for cv. Dataset is 870 obs; split in half with 435
+set.seed(1234)
+index<-sample(1:dim(cs2m)[1],435,replace=F)
+train.os<-cs2m.balanced[index,]
+test.os<-cs2m.balanced[-index,]
+```
+
+Then we can run the NB model again on the balanced sets.
+
+```{r, message=FALSE, warning=FALSE}
+x = train.os[,-2]
+y = train.os$Attrition
+control <- rfeControl(functions=nbFuncs, method="cv", number=50) #nbFuncs is for Naive Bayes
+results <- rfe(x, y, rfeControl=control)
+predictors <- predictors(results) #save the selected predicors so we can re-run the model with them
+predictors
+```
+The top predictors havent changed much, but the model built withe balanced data will likely be very different. We can trust the selection algorithm a bit more now that we are using balanced data. We can test the top 10 predictors to see what the results are for the balanced oversampled training and test partitions.
+
+```{r, message=FALSE, warning=FALSE}
+x = train.os[,-2]
+y = train.os$Attrition
+control <- rfeControl(functions=nbFuncs, method="cv", number=50) #nbFuncs is for Naive Bayes
+results <- rfe(x, y, rfeControl=control)
+predictors <- predictors(results)
+model = naiveBayes(train.os[predictors[1:12]],train.os$Attrition)
+confusionMatrix(table(predict(model,test.os[predictors[1:12]]), test.os$Attrition))
+```
+
+Running the model using the balanced training and test partitions has produced a more balanced sensitivity and specificity (but decreased overall accuracy). We can run the model again on the full balanced dataset and then predict the outcomes for the original dataset to see if we still get more balanced results.
+
+```{r, warning=FALSE, message=FALSE}
+#Accuracy, Sensitivity and Specificity of Model on Training set (Full Dataset)
+fullmodel = naiveBayes(cs2m.balanced[predictors[1:12]],cs2m.balanced$Attrition)
+confusionMatrix(table(predict(fullmodel,cs2m[predictors[1:12]]), cs2m$Attrition))
+```
+
+This model does have much lower accuracy, but the initial model with unbalanced data was producing biased results for overall accuracy because of the lower probability of "yes" outcomes. It could essentially pick "no" most of the time regardless of variable information and get good accuracy.
+
+
+### Logisitic Regression
+
+We can try a logistic regression model using a similar method. We can use the same oversampled training and test sets to get an idea of what the model can do.
+```{r}
+fitControl <- trainControl(## 10-fold CV
+  method = "cv",
+  number = 10,
+  savePredictions = TRUE
+)
+logitmodel <- train(Attrition ~., data=train.os, method="glm", family=binomial(), trControl=fitControl)
+varImp(logitmodel) #variable importance
+
+confusionMatrix(table(predict(logitmodel,test.os), test.os$Attrition))
+```
+
+Again, the logistic model found that the top variables effecting attrition were similar to those from the Naive Bayes model. Based on the results, the logistic model may be a bit better, but first we can build a model with the entire balnced/oversampled set, and then predict against the original data.
+
+```{r}
+fitControl <- trainControl(## 10-fold CV
+  method = "cv",
+  number = 50,
+  savePredictions = TRUE
+)
+logitmodel <- train(Attrition ~., data=cs2m.balanced, method="glm", family=binomial(), trControl=fitControl)
+summary(logitmodel)
+```
+
+Finally, we can take out insignificant variables and re-run the model.
+```{r}
+logitmodel <- train(Attrition ~ DailyRate + DistanceFromHome + Gender + JobInvolvement + JobRole + JobSatisfaction + MaritalStatus + NumCompaniesWorked + OverTime + TrainingTimesLastYear + YearsSinceLastPromotion + YearsWithCurrManager, data=cs2m.balanced, method="glm", family=binomial(), trControl=fitControl)
+
+summary(logitmodel)
+predictions <- predict(logitmodel, cs2m)
+confusionMatrix(table(predictions, cs2m$Attrition))
+```
+
+All parameters are significant and the results are a bit better than the NB model. Since we achieved higher accuracy, sensitivity, and specificity with the logit model, we should use that for our predictions of attrition based on this data.
+
+
+
+## Regression Analysis - Predicting Salary (Monthly Income)
+
+
+For Salary, we can look back at the correlation matrix to see what variables are correlated with Salary and/or each other. Intuitively, Total Working Years and Job level appear to be the most correlated with Salary. Others like Years at the company/role/last promotion/with manager are correlated with job level and Working years; it looks like YearsAtCompany might be a good variable to use in their place.
+
+Checking plots of correlated numeric variables. Adding a color for JobLevel helps identify separation by Job Level.
+```{r, warning=FALSE, message=FALSE}
+detach("package:klaR", unload = TRUE)
+library(dplyr)
+cs2m1 <- cs2m %>% dplyr::select(MonthlyIncome, JobLevel, TotalWorkingYears, YearsAtCompany, Age)
+pairs(cs2m1, col=cs2m$JobLevel)
+```
+
+The most telling of these is TotalWorkingYears and JobLevel - plotting the TotalWorkingYears color coded by Job level looks promising.
+```{r}
+plot(x=cs2m$TotalWorkingYears, y=cs2m$MonthlyIncome, col=cs2m$JobLevel, main ="Total Working Years grouped by Job Level vs Salary", xlab="Total Working Years", ylab="Monthly Income ($)")
+```
+
+It doesnt look like there is a clear trend between YearsAtCompany and MonthlyIncome.Age also looks spread out on the plot, but there is some trend. We can try to take the log of those variables to see if that helps.
+
+```{r}
+cs2m1$log_YearsAtCompany <- log(cs2m1$YearsAtCompany)
+cs2m1$log_Age <- log(cs2m1$Age)
+pairs(cs2m1)
+```
+
+Taking the log of those variables didn't make for much better plots, but we can add the original variables to the MLR model and see if they make a significant difference.
+
+
+### Regression Analysis of Salary with Continous Variables from EDA
+
+Using the variables selected from the initial analysis we can run a simple regression model.
+```{r}
+model1 <- lm(MonthlyIncome~TotalWorkingYears+JobLevel+YearsAtCompany+Age, data=train)
+summary(model1)
+```
+
+After looking at the results, the variables "YearsAtCompany" and "Age" are not statistically significant, so they can be removed.
+```{r}
+model1 <- lm(MonthlyIncome~TotalWorkingYears+JobLevel, data=train)
+summary(model1)
+
+#This is the RMSE on the training partition
+training_RMSE <- sqrt(sum(model1$residuals^2) / model1$df)
+print(paste("Training partition RMSE:", training_RMSE))
+```
+
+The adjusted R-sq of .921 is pretty good for just two predictors. We can check variance inflation factors for multicollinearity issues and the residual plots for any assumption violations.
+```{r}
+vif(model1)
+
+#checking residuals
+par(mfrow=c(2,2))
+plot(model1)
+```
+
+None of the VIFs appear too high (with only 2 variables, this should be expected). The residuals appear normally distributed and there aren't any severe outliers. Shouldnt be any issues, so we can verify the model on the test set.
+```{r}
+model1_preds <- predict(model1, test)
+test_preds <- data.frame(model1_preds)
+
+#test set RMSE
+test_RMSE <- sqrt(sum((test_preds$model1_preds-test$MonthlyIncome)^2) / model1$df)
+print(paste("Test partition RMSE:", test_RMSE))
+```
+
+The RMSE of the test set doesnt look too far off of the RMSE of the training set, so it appears to be a decent model.
+
+This is a very simple model for interpretive purposes. We can easily determine Monthly salary with a relatively high degree of accuracy using only two easily identifiable continous variables - the total number of years worked and the job level. Since we ended on 2 predictor variables, we can even look at a 3D scatterplot to visualize our model on the data.
+```{r}
+x <- seq(1, 40, length = 70)
+y <- seq(1, 5, length = 70)
+plane <- outer(x, y, function(a, b){summary(model1)$coef[1,1] + 
+    summary(model1)$coef[2,1]*a + summary(model1)$coef[3,1]*b})
+
+p <- plot_ly(data = cs2m, z = ~MonthlyIncome, x = ~TotalWorkingYears, y = ~JobLevel, opacity=.6) %>% add_markers()
+
+p %>% add_surface(x = ~x, y = ~y, z = ~plane, showscale = FALSE) %>% layout(title="MLR Model to predict Monthly Income")
+```
+
+
+
+### Adding categorical variables to the model
+
+The numeric variables have already been hashed out so we will only include those we know to be helpful. The categorical variables are somewhat difficult to tie to the continous response of MonthlyIncome. We can add in all of the categorical variables and use ASE plots of the test and training sets to see how many variables we can add before overfitting the model.
+
+We can first pare down our training and test sets to just the variables we will test because we already decided which numeric variables are worth keeping.
+```{r select variables}
+#Select only variables we want to try so we dont have to write them all in the lm code
+train2 <- train %>% dplyr::select(MonthlyIncome, JobLevel, TotalWorkingYears, BusinessTravel, Department, Education, EducationField, Gender, JobRole, StockOptionLevel)
+
+test2 <- test %>% dplyr::select(MonthlyIncome, JobLevel, TotalWorkingYears, BusinessTravel, Department, Education, EducationField, Gender, JobRole, StockOptionLevel)
+```
+
+The code below will run a backward selection method that will use both our continous and categorical variables. It is set to include up to a maximum of 10 variables (all of them). The ASE of the train vs test set are compared to see how many variables can be added without overfitting.
+```{r forward selection}
+#Forward selection variable selection
+reg.bwd=regsubsets(MonthlyIncome~.,data=train2,method="backward", nvmax=10)
+
+#prediction function
+predict.regsubsets =function (object , newdata ,id ,...){
+  form=as.formula (object$call [[2]])
+  mat=model.matrix(form ,newdata )
+  coefi=coef(object ,id=id)
+  xvars=names(coefi)
+  mat[,xvars]%*%coefi
+}
+
+#plot test and train ASE;***note index is to 15 since that what I set it in regsubsets
+testASE<-c()
+for (i in 1:10){
+  predictions<-predict.regsubsets(object=reg.bwd,newdata=test2,id=i)
+  testASE[i]<-mean((test2$MonthlyIncome-predictions)^2)
+}
+par(mfrow=c(1,1))
+plot(1:10,testASE,type="l",xlab="# of predictors",ylab="ASE", ylim=c(500000,2000000), main="Test (black) vs Train (blue) ASE")
+index<-which(testASE==min(testASE))
+points(index,testASE[index],col="red",pch=10)
+rss<-summary(reg.bwd)$rss
+lines(1:10, rss/435,lty=3, col="blue")  #Dividing by 435 since ASE=RSS/sample size
+
+```
+
+Based on the ASE comparison plot, the model doesnt improve after around 4 or 5 selection steps, so we can re-run the model using the first 5 steps and see what they are.
+```{r re-run with 5 steps}
+#final regression model
+reg.final=regsubsets(MonthlyIncome~.,data=train2,method="forward",nvmax=5)
+coef(reg.final,5)
+```
+
+The last 3 of the 5 variables were levels of the factor "JobRole". So really we can just add JobRole to the model and see if we improved it from just including the 2 continous variables.
+
+```{r}
+final.model<-lm(MonthlyIncome~JobLevel+TotalWorkingYears+JobRole,data=train2)
+summary(final.model)
+confint(final.model)
+
+#Check Residuals
+par(mfrow=c(2,2))
+plot(final.model)
+```
+
+The residual plots give no reason for concern. With an adjusted R-sq of .957, the model is looking pretty good. 
+
+```{r RMSE of model on test set}
+#test set predictions
+fm_preds <- predict(final.model, test)
+fmtest_preds <- data.frame(fm_preds)
+#test set RMSE
+fmtest_RMSE <- sqrt(sum((fmtest_preds$fm_preds-test2$MonthlyIncome)^2) / final.model$df)
+print(paste("Test partition RMSE:", fmtest_RMSE))
+```
+
+The RMSE of the model on the test set looks better than our first model, so we can confidently say that adding the "JobRole" variable improves the predictive capability.
+
+The final linear regression model to be used for predicting Monthly Income is a function of Job Role, Job Level, and Total Working years, which means that we still have a realtively simple and easily interpretable model for prediction.
+
+
+## Final Notes for project Requirements
+
+For the classification (attrition) analysis: The requirement stipulates that the "training set" in addition to the "CaseStudy2CompSet No Attrition.csv" set need to have a sens/spec of > 60/60, the stats for the entire provided dataset are below. Then the predictions on the "CaseStudy2CompSet No Attrition.csv" are made using the logisitic regression model and set up for export.
+```{r}
+predictions <- predict(logitmodel, cs2m)
+confusionMatrix(table(predictions, cs2m$Attrition))
+```
+
+```{r}
+cs3 <- read.csv("CaseStudy2CompSet No Attrition.csv",header = TRUE)
+Attrition <- predict(logitmodel, cs3)
+ltest_preds <- data.frame(cs3$ID, Attrition)
+#write.csv(ltest_preds, "Case2PredictionsEysenbach Attrition.csv")
+```
+
+For the regression (Salary) analysis: The requirement stipulates that the "training set" in addition to the "CaseStudy2CompSet No Salary.csv" set need an RMSE of <3000, the RMSE of the entire provided dataset is below. Then the predictions on the "CaseStudy2CompSet No Salary.csv" are made for export.
+```{r}
+#RMSE if model is run on entire dataset
+fullmodel<-lm(MonthlyIncome~JobLevel+TotalWorkingYears+JobRole,data=cs2)
+training_RMSE <- sqrt(sum(fullmodel$residuals^2) / fullmodel$df)
+print(paste("Training RMSE - full dataset:", training_RMSE))
+```
+
+```{r}
+#predictions for "CaseStudy2CompSet No Salary.csv"
+cs4 <- read.csv("CaseStudy2CompSet No Salary.csv",header = TRUE)
+MonthlySalary <- predict(fullmodel, cs4)
+ftest_preds <- data.frame(cs4$ID, MonthlySalary)
+#write.csv(ftest_preds, "Case2PredictionsEysenbach Salary.csv")
+```
